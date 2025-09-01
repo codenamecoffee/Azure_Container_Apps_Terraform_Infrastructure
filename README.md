@@ -1,20 +1,51 @@
-# Introduction 
-TODO: Give a short introduction of your project. Let this section explain the objectives or the motivation behind this project. 
+# 🚀 Terraform en Azure DevOps (Fork-Friendly)
 
-# Getting Started
-TODO: Guide users through getting your code up and running on their own system. In this section you can talk about:
-1.	Installation process
-2.	Software dependencies
-3.	Latest releases
-4.	API references
+Este proyecto es un **esqueleto** para correr Terraform en **Azure DevOps** con **state remoto en Azure Storage**.
+Cada persona que haga **fork** obtiene su **propio container de state**, pero todos comparten la misma **Storage Account**.
 
-# Build and Test
-TODO: Describe and show how to build your code and run the tests. 
+## 📂 Estructura
+```
+.
+├── azure-pipelines.yml     # Pipeline de Azure DevOps
+├── infra/                  # Configuración Terraform
+│   ├── main.tf
+│   └── variables.tf
+└── env/
+    └── dev.tfvars
+```
 
-# Contribute
-TODO: Explain how other users and developers can contribute to make your code better. 
+## ⚙️ Prerrequisitos
+1. **Azure Subscription** y una **Storage Account** compartida (ej.: RG=`rg-tfstate`, SA=`stterraformstate123`).
+2. **Service Connection** en Azure DevOps (ARM) con permisos para crear contenedores en la SA (RBAC: *Storage Blob Data Contributor*).
+3. Crear un **Environment** en ADO (ej. `infra-dev`) para approvals si querés.
 
-If you want to learn more about creating good readme files then refer the following [guidelines](https://docs.microsoft.com/en-us/azure/devops/repos/git/create-a-readme?view=azure-devops). You can also seek inspiration from the below readme files:
-- [ASP.NET Core](https://github.com/aspnet/Home)
-- [Visual Studio Code](https://github.com/Microsoft/vscode)
-- [Chakra Core](https://github.com/Microsoft/ChakraCore)
+## ▶️ Cómo funciona
+- La pipeline deriva un **container único por fork** desde `Build.Repository.Name`, lo normaliza (minúsculas y guiones) y crea el container si no existe.
+- `terraform init` recibe **-backend-config** con: RG, SA, *container por fork* y `key` (ruta `<repo>/<env>.tfstate`).
+
+## 🧪 Probar rápido
+1. Hacé **fork** del repo.
+2. En Azure DevOps, crea la pipeline apuntando a `azure-pipelines.yml`.
+3. Ejecutá: la pipeline creará tu **container** y hará `plan` (en PR) y `apply` (solo `main`).
+
+## 🔐 Buenas prácticas
+- No subas `terraform.tfstate` ni `*.tfplan` al repo.
+- Usa `tfvars` por entorno y mantén secrets en **Variable Groups** o **Key Vault**.
+- Commitea `.terraform.lock.hcl` para fijar versiones de providers.
+
+
+## 🧩 Unicidad por proyecto + repo
+La pipeline deriva el **container** usando `$(System.TeamProject)-$(Build.Repository.Name)`,
+lo normaliza y lo recorta a 63 chars. Así, dos repos con el mismo nombre en proyectos distintos
+no comparten el mismo container de state.
+
+
+### 🧹 Destroy manual
+La pipeline incluye un **stage `Destroy`** que sólo corre cuando lo lanzás **manualmente** con la variable `DO_DESTROY=true`.
+
+**Cómo usarlo en Azure DevOps:**
+1. Pipelines → Run pipeline → **Variables** → agrega `DO_DESTROY=true`.
+2. Ejecutá. El stage `Destroy` usará el **mismo backend** (container derivado por proyecto+repo) y hará `terraform destroy` en el `workspace` del entorno (`environmentName`).
+3. El job está asociado al **Environment** especificado para que puedas requerir **aprobaciones** antes de destruir.
+
+> Si tenés `env/dev.tfvars` (o el que corresponda), el destroy lo carga automáticamente.

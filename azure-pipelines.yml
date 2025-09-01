@@ -1,0 +1,153 @@
+# azure-pipelines.yml
+trigger:
+  branches: [ main ]
+pr:
+  branches: [ '*' ]
+
+variables:
+  tf_version: '1.9.7'
+  serviceConnection: 'YOUR-AZURE-SERVICE-CONNECTION'  # <- cámbialo
+  tf_working_dir: 'infra'
+  environmentName: 'dev'
+
+  # Infra compartida (creada previamente)
+  backend_rg: 'rg-tfstate'
+  backend_storage: 'stterraformstate123'
+  backend_key: '$(Build.Repository.Name)/$(environmentName).tfstate'  # ruta por fork
+
+stages:
+- stage: Plan
+  displayName: "Validate & Plan"
+  jobs:
+  - job: plan
+    pool: { vmImage: 'ubuntu-latest' }
+    steps:
+      - checkout: self
+
+      # 1) Derivar y normalizar el container por fork
+      - task: Bash@3
+        name: DeriveContainer
+        displayName: 'Derivar container por fork'
+        inputs:
+          targetType: inline
+          script: |
+set -euo pipefail
+# Derivar nombre único por proyecto + repo (Azure DevOps)
+name="$(System.TeamProject)-$(Build.Repository.Name)"
+norm="$(echo "$name" | tr '[:upper:]' '[:lower:]' | sed 's|[^a-z0-9-]|-|g')"
+norm="$(echo "$norm" | sed 's/^-*//; s/-*$//')"
+norm="$(echo "$norm" | cut -c1-63)"
+if [ ${#norm} -lt 3 ]; then norm="tfstate-$(date +%s)"; fi
+container="tfstate-${norm}"
+echo "Container derivado: ${container}"
+echo "##vso[task.setvariable variable=backend_container;isOutput=true]${container}"
+
+
+      # 2) Crear container si no existe (RBAC/AAD)
+      - task: AzureCLI@2
+        displayName: 'Ensure container existe'
+        inputs:
+          azureSubscription: '$(serviceConnection)'
+          scriptType: bash
+          scriptLocation: inlineScript
+          inlineScript: |
+            set -euo pipefail
+            RG="$(backend_rg)"
+            SA="$(backend_storage)"
+            CT="$(DeriveContainer.backend_container)"
+            az storage container create \
+              --name "$CT" \
+              --account-name "$SA" \
+              --auth-mode login \
+              --public-access off 1>/dev/null
+
+      # 3) Terraform fmt/init/validate/plan
+      - task: AzureCLI@2
+        displayName: 'Terraform plan'
+        inputs:
+          azureSubscription: '$(serviceConnection)'
+          scriptType: bash
+          scriptLocation: inlineScript
+          inlineScript: |
+            set -euo pipefail
+            cd "$(tf_working_dir)"
+            if ! command -v terraform >/dev/null; then
+              curl -sSLo tf.zip "https://releases.hashicorp.com/terraform/$(tf_version)/terraform_$(tf_version)_linux_amd64.zip"
+              unzip -o tf.zip && sudo mv terraform /usr/local/bin/
+            fi
+            terraform fmt -check -recursive
+            terraform init \
+              -backend-config="resource_group_name=$(backend_rg)" \
+              -backend-config="storage_account_name=$(backend_storage)" \
+              -backend-config="container_name=$(DeriveContainer.backend_container)" \
+              -backend-config="key=$(backend_key)"
+            terraform workspace select "$(environmentName)" || terraform workspace new "$(environmentName)"
+            terraform validate
+            terraform plan -out="$(Pipeline.Workspace)/tfplan.tfplan" -lock-timeout=20m
+
+      - publish: '$(Pipeline.Workspace)/tfplan.tfplan'
+        artifact: tfplan
+
+- stage: Apply
+  displayName: "Apply (main)"
+  dependsOn: Plan
+  condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+  jobs:
+  - job: apply
+    pool: { vmImage: 'ubuntu-latest' }
+    environment: 'infra-$(environmentName)'
+    steps:
+      - download: current
+        artifact: tfplan
+      - task: AzureCLI@2
+        displayName: 'Terraform apply'
+        inputs:
+          azureSubscription: '$(serviceConnection)'
+          scriptType: bash
+          scriptLocation: inlineScript
+          inlineScript: |
+            set -euo pipefail
+            cd "$(tf_working_dir)"
+            if ! command -v terraform >/dev/null; then
+              curl -sSLo tf.zip "https://releases.hashicorp.com/terraform/$(tf_version)/terraform_$(tf_version)_linux_amd64.zip"
+              unzip -o tf.zip && sudo mv terraform /usr/local/bin/
+            fi
+            terraform init \
+              -backend-config="resource_group_name=$(backend_rg)" \
+              -backend-config="storage_account_name=$(backend_storage)" \
+              -backend-config="container_name=$(DeriveContainer.backend_container)" \
+              -backend-config="key=$(backend_key)"
+            terraform workspace select "$(environmentName)" || terraform workspace new "$(environmentName)"
+            terraform apply -input=false -auto-approve "$(Pipeline.Workspace)/tfplan/tfplan.tfplan"
+
+
+- stage: Destroy
+  displayName: "Destroy (manual)"
+  dependsOn: []
+  condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+  jobs:
+  - job: destroy
+    pool: { vmImage: 'ubuntu-latest' }
+    environment: 'infra-$(environmentName)'  # requiere aprobación manual
+    steps:
+      - checkout: self
+      - task: AzureCLI@2
+        displayName: 'Terraform destroy'
+        inputs:
+          azureSubscription: '$(serviceConnection)'
+          scriptType: bash
+          scriptLocation: inlineScript
+          inlineScript: |
+            set -euo pipefail
+            cd "$(tf_working_dir)"
+            if ! command -v terraform >/dev/null; then
+              curl -sSLo tf.zip "https://releases.hashicorp.com/terraform/$(tf_version)/terraform_$(tf_version)_linux_amd64.zip"
+              unzip -o tf.zip && sudo mv terraform /usr/local/bin/
+            fi
+            terraform init \
+              -backend-config="resource_group_name=$(backend_rg)" \
+              -backend-config="storage_account_name=$(backend_storage)" \
+              -backend-config="container_name=$(DeriveContainer.backend_container)" \
+              -backend-config="key=$(backend_key)"
+            terraform workspace select "$(environmentName)" || terraform workspace new "$(environmentName)"
+            terraform destroy -auto-approve -lock-timeout=20m
