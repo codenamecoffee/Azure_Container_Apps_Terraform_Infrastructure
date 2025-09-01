@@ -1,7 +1,7 @@
 variable "rg_name" {
   description = "Nombre del Resource Group"
   type        = string
-  default     = "rg-terraform-demo"
+  default     = "school-of-2025"
 }
 
 variable "location" {

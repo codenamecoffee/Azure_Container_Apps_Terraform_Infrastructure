@@ -1,153 +1,291 @@
-# azure-pipelines.yml
+# Ejecuta CI en main. La validación de PR se dispara con Branch Policies (Build validation).
 trigger:
-  branches: [ main ]
-pr:
-  branches: [ '*' ]
+  branches:
+    include:
+      - main
+
+# Evita doble ejecución: el PR lo dispara la política, no el YAML.
+pr: none
+
+resources:
+  containers:
+    - container: runner
+      image: schoolof.azurecr.io/runner:latest
+      endpoint: sc-acr-schoolof
+      options: --user 0:0
 
 variables:
-  tf_version: '1.9.7'
-  serviceConnection: 'YOUR-AZURE-SERVICE-CONNECTION'  # <- cámbialo
-  tf_working_dir: 'infra'
-  environmentName: 'dev'
+  serviceConnection: sc-school-of-2025-mvd
+  tf_working_dir: infra
+  environmentName: dev
 
-  # Infra compartida (creada previamente)
-  backend_rg: 'rg-tfstate'
-  backend_storage: 'stterraformstate123'
-  backend_key: '$(Build.Repository.Name)/$(environmentName).tfstate'  # ruta por fork
+  backend_rg: SchoolOf
+  backend_storage: schooloftfstates
+  backend_container: tfstate-schoolof2025-terraform
+  backend_key: $(Build.Repository.Name)/$(environmentName).tfstate
+
+  DO_DESTROY: 'false'
 
 stages:
+# =========================
+# PLAN (se ejecuta en PR y main)
+# =========================
 - stage: Plan
-  displayName: "Validate & Plan"
+  displayName: Validate & Plan
   jobs:
   - job: plan
-    pool: { vmImage: 'ubuntu-latest' }
+    displayName: Terraform Plan
+    pool:
+      name: Default
+    container: runner
     steps:
       - checkout: self
+        fetchDepth: 0
 
-      # 1) Derivar y normalizar el container por fork
-      - task: Bash@3
-        name: DeriveContainer
-        displayName: 'Derivar container por fork'
-        inputs:
-          targetType: inline
-          script: |
-set -euo pipefail
-# Derivar nombre único por proyecto + repo (Azure DevOps)
-name="$(System.TeamProject)-$(Build.Repository.Name)"
-norm="$(echo "$name" | tr '[:upper:]' '[:lower:]' | sed 's|[^a-z0-9-]|-|g')"
-norm="$(echo "$norm" | sed 's/^-*//; s/-*$//')"
-norm="$(echo "$norm" | cut -c1-63)"
-if [ ${#norm} -lt 3 ]; then norm="tfstate-$(date +%s)"; fi
-container="tfstate-${norm}"
-echo "Container derivado: ${container}"
-echo "##vso[task.setvariable variable=backend_container;isOutput=true]${container}"
-
-
-      # 2) Crear container si no existe (RBAC/AAD)
       - task: AzureCLI@2
-        displayName: 'Ensure container existe'
+        displayName: Ensure container existe
         inputs:
-          azureSubscription: '$(serviceConnection)'
+          azureSubscription: $(serviceConnection)
+          addSpnToEnvironment: true
           scriptType: bash
           scriptLocation: inlineScript
           inlineScript: |
             set -euo pipefail
-            RG="$(backend_rg)"
-            SA="$(backend_storage)"
-            CT="$(DeriveContainer.backend_container)"
             az storage container create \
-              --name "$CT" \
-              --account-name "$SA" \
+              --name "$(backend_container)" \
+              --account-name "$(backend_storage)" \
               --auth-mode login \
-              --public-access off 1>/dev/null
+              --public-access off 1>/dev/null || true
 
-      # 3) Terraform fmt/init/validate/plan
       - task: AzureCLI@2
-        displayName: 'Terraform plan'
+        displayName: Terraform plan (OIDC + ARM_*)
         inputs:
-          azureSubscription: '$(serviceConnection)'
+          azureSubscription: $(serviceConnection)
+          addSpnToEnvironment: true
           scriptType: bash
           scriptLocation: inlineScript
           inlineScript: |
             set -euo pipefail
+
+            terraform -version || { echo "Terraform no está en PATH en la imagen"; exit 1; }
+
+            # OIDC -> archivo para ARM_OIDC_TOKEN_FILE_PATH
+            OIDC_FILE="$(Pipeline.Workspace)/ado_oidc.token"
+            umask 077
+            printf '%s' "${idToken:-}" > "$OIDC_FILE"
+
+            # Auth para backend y provider (sin usar az account get-access-token)
+            export ARM_USE_OIDC=true
+            export ARM_TENANT_ID="$tenantId"
+            export ARM_CLIENT_ID="$servicePrincipalId"
+            export ARM_SUBSCRIPTION_ID="$(az account show --query id -o tsv)"
+            export ARM_OIDC_TOKEN_FILE_PATH="$OIDC_FILE"
+            unset ARM_USE_CLI || true
+
             cd "$(tf_working_dir)"
-            if ! command -v terraform >/dev/null; then
-              curl -sSLo tf.zip "https://releases.hashicorp.com/terraform/$(tf_version)/terraform_$(tf_version)_linux_amd64.zip"
-              unzip -o tf.zip && sudo mv terraform /usr/local/bin/
-            fi
             terraform fmt -check -recursive
+
             terraform init \
               -backend-config="resource_group_name=$(backend_rg)" \
               -backend-config="storage_account_name=$(backend_storage)" \
-              -backend-config="container_name=$(DeriveContainer.backend_container)" \
+              -backend-config="container_name=$(backend_container)" \
               -backend-config="key=$(backend_key)"
+
             terraform workspace select "$(environmentName)" || terraform workspace new "$(environmentName)"
             terraform validate
-            terraform plan -out="$(Pipeline.Workspace)/tfplan.tfplan" -lock-timeout=20m
 
-      - publish: '$(Pipeline.Workspace)/tfplan.tfplan'
-        artifact: tfplan
+            PLAN_OUT="$(Pipeline.Workspace)/tfplan.tfplan"
+            if [ -f "../env/$(environmentName).tfvars" ]; then
+              terraform plan -var-file="../env/$(environmentName).tfvars" -out="$PLAN_OUT" -lock-timeout=20m
+            else
+              terraform plan -out="$PLAN_OUT" -lock-timeout=20m
+            fi
 
+            # Un único plan por PR (si corre como validación de PR via Branch Policy)
+            if [ "$(Build.Reason)" = "PullRequest" ]; then
+              PR_ID="$(System.PullRequest.PullRequestId)"
+              if [ -n "$PR_ID" ]; then
+                BLOB_PR="plans/pr-${PR_ID}.tfplan"
+                az storage blob upload \
+                  --account-name "$(backend_storage)" \
+                  --container-name "$(backend_container)" \
+                  --name "$BLOB_PR" \
+                  --file "$PLAN_OUT" \
+                  --auth-mode login --overwrite
+              fi
+            fi
+
+      - task: PublishBuildArtifacts@1
+        displayName: Publicar tfplan (artefacto del run)
+        inputs:
+          pathToPublish: $(Pipeline.Workspace)/tfplan.tfplan
+          artifactName: tfplan
+          publishLocation: Container
+
+# =========================
+# APPLY (sólo en main)
+# =========================
 - stage: Apply
-  displayName: "Apply (main)"
+  displayName: Apply (main)
   dependsOn: Plan
   condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
   jobs:
   - job: apply
-    pool: { vmImage: 'ubuntu-latest' }
-    environment: 'infra-$(environmentName)'
-    steps:
-      - download: current
-        artifact: tfplan
-      - task: AzureCLI@2
-        displayName: 'Terraform apply'
-        inputs:
-          azureSubscription: '$(serviceConnection)'
-          scriptType: bash
-          scriptLocation: inlineScript
-          inlineScript: |
-            set -euo pipefail
-            cd "$(tf_working_dir)"
-            if ! command -v terraform >/dev/null; then
-              curl -sSLo tf.zip "https://releases.hashicorp.com/terraform/$(tf_version)/terraform_$(tf_version)_linux_amd64.zip"
-              unzip -o tf.zip && sudo mv terraform /usr/local/bin/
-            fi
-            terraform init \
-              -backend-config="resource_group_name=$(backend_rg)" \
-              -backend-config="storage_account_name=$(backend_storage)" \
-              -backend-config="container_name=$(DeriveContainer.backend_container)" \
-              -backend-config="key=$(backend_key)"
-            terraform workspace select "$(environmentName)" || terraform workspace new "$(environmentName)"
-            terraform apply -input=false -auto-approve "$(Pipeline.Workspace)/tfplan/tfplan.tfplan"
-
-
-- stage: Destroy
-  displayName: "Destroy (manual)"
-  dependsOn: []
-  condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
-  jobs:
-  - job: destroy
-    pool: { vmImage: 'ubuntu-latest' }
-    environment: 'infra-$(environmentName)'  # requiere aprobación manual
+    pool:
+      name: Default
+    container: runner
     steps:
       - checkout: self
+        fetchDepth: 0
+
+      # Resolver PR de origen del commit de merge (API ADO con PAT) y descargar su plan único
       - task: AzureCLI@2
-        displayName: 'Terraform destroy'
+        displayName: Resolver PR y descargar plan del PR (con PAT)
+        env:
+          ADO_PAT: $(ADO_PAT)   # definir como secret en el pipeline (scope: Code Read)
         inputs:
-          azureSubscription: '$(serviceConnection)'
+          azureSubscription: $(serviceConnection)
+          addSpnToEnvironment: true
           scriptType: bash
           scriptLocation: inlineScript
           inlineScript: |
             set -euo pipefail
-            cd "$(tf_working_dir)"
-            if ! command -v terraform >/dev/null; then
-              curl -sSLo tf.zip "https://releases.hashicorp.com/terraform/$(tf_version)/terraform_$(tf_version)_linux_amd64.zip"
-              unzip -o tf.zip && sudo mv terraform /usr/local/bin/
+
+            ORG_URL="$(System.CollectionUri)"
+            PROJ="$(System.TeamProject)"
+            REPO_NAME="$(Build.Repository.Name)"
+            COMMIT="$(Build.SourceVersion)"
+
+            if ! command -v jq >/dev/null 2>&1; then
+              apt-get update -y >/dev/null && apt-get install -y jq >/dev/null
             fi
+
+            # repoId por nombre
+            REPOS_JSON="$(curl -sS -u :${ADO_PAT} \
+              "${ORG_URL}${PROJ}/_apis/git/repositories?api-version=7.0")"
+            REPO_ID="$(echo "$REPOS_JSON" | jq -r --arg NAME "$REPO_NAME" '.value[] | select(.name==$NAME) | .id')"
+            if [ -z "${REPO_ID:-}" ] || [ "$REPO_ID" = "null" ]; then
+              echo "No repoId; fallback a re-plan."
+              exit 0
+            fi
+
+            # PR asociado al commit de merge
+            PRS_JSON="$(curl -sS -u :${ADO_PAT} \
+              "${ORG_URL}${PROJ}/_apis/git/repositories/${REPO_ID}/commits/${COMMIT}/pullRequests?api-version=7.0")"
+            PR_ID="$(echo "$PRS_JSON" | jq -r '.value[0].pullRequestId // empty')"
+            if [ -z "${PR_ID:-}" ]; then
+              echo "Sin PR asociado; fallback a re-plan."
+              exit 0
+            fi
+            echo "PR: #$PR_ID"
+
+            BLOB_PR="plans/pr-${PR_ID}.tfplan"
+            PLAN_OUT="$(Pipeline.Workspace)/tfplan-pr.tfplan"
+
+            az storage blob download \
+              --account-name "$(backend_storage)" \
+              --container-name "$(backend_container)" \
+              --name "$BLOB_PR" \
+              --file "$PLAN_OUT" \
+              --auth-mode login --no-progress
+
+            echo "##vso[task.setvariable variable=PR_PLAN_PATH]$PLAN_OUT"
+
+      - task: AzureCLI@2
+        displayName: Terraform apply (reusar plan del PR si existe, sino re-plan)
+        inputs:
+          azureSubscription: $(serviceConnection)
+          addSpnToEnvironment: true
+          scriptType: bash
+          scriptLocation: inlineScript
+          inlineScript: |
+            set -euo pipefail
+
+            terraform -version || { echo "Terraform no está en PATH en la imagen"; exit 1; }
+
+            # OIDC token file para ARM_*
+            OIDC_FILE="$(Pipeline.Workspace)/ado_oidc.token"
+            umask 077
+            printf '%s' "${idToken:-}" > "$OIDC_FILE"
+
+            export ARM_USE_OIDC=true
+            export ARM_TENANT_ID="$tenantId"
+            export ARM_CLIENT_ID="$servicePrincipalId"
+            export ARM_SUBSCRIPTION_ID="$(az account show --query id -o tsv)"
+            export ARM_OIDC_TOKEN_FILE_PATH="$OIDC_FILE"
+            unset ARM_USE_CLI || true
+
+            cd "$(tf_working_dir)"
             terraform init \
               -backend-config="resource_group_name=$(backend_rg)" \
               -backend-config="storage_account_name=$(backend_storage)" \
-              -backend-config="container_name=$(DeriveContainer.backend_container)" \
+              -backend-config="container_name=$(backend_container)" \
               -backend-config="key=$(backend_key)"
+
             terraform workspace select "$(environmentName)" || terraform workspace new "$(environmentName)"
-            terraform destroy -auto-approve -lock-timeout=20m
+
+            if [ -n "${PR_PLAN_PATH:-}" ] && [ -f "${PR_PLAN_PATH:-}" ]; then
+              echo "Usando plan del PR: ${PR_PLAN_PATH}"
+              terraform apply -input=false -auto-approve "${PR_PLAN_PATH}"
+            else
+              echo "No se encontró plan del PR; generando plan nuevamente..."
+              if [ -f "../env/$(environmentName).tfvars" ]; then
+                terraform plan -var-file="../env/$(environmentName).tfvars" -out="$(Pipeline.Workspace)/tfplan.tfplan" -lock-timeout=20m
+              else
+                terraform plan -out="$(Pipeline.Workspace)/tfplan.tfplan" -lock-timeout=20m
+              fi
+              terraform apply -input=false -auto-approve "$(Pipeline.Workspace)/tfplan.tfplan"
+            fi
+
+# =========================
+# DESTROY (manual)
+# =========================
+- stage: Destroy
+  displayName: Destroy (manual)
+  dependsOn: []
+  condition: and(succeeded(), eq(variables['DO_DESTROY'], 'true'))
+  jobs:
+  - job: destroy
+    pool:
+      name: Default
+    container: runner
+    steps:
+      - checkout: self
+        fetchDepth: 0
+
+      - task: AzureCLI@2
+        displayName: Terraform destroy (OIDC + ARM_*)
+        inputs:
+          azureSubscription: $(serviceConnection)
+          addSpnToEnvironment: true
+          scriptType: bash
+          scriptLocation: inlineScript
+          inlineScript: |
+            set -euo pipefail
+
+            terraform -version || { echo "Terraform no está en PATH en la imagen"; exit 1; }
+
+            OIDC_FILE="$(Pipeline.Workspace)/ado_oidc.token"
+            umask 077
+            printf '%s' "${idToken:-}" > "$OIDC_FILE"
+
+            export ARM_USE_OIDC=true
+            export ARM_TENANT_ID="$tenantId"
+            export ARM_CLIENT_ID="$servicePrincipalId"
+            export ARM_SUBSCRIPTION_ID="$(az account show --query id -o tsv)"
+            export ARM_OIDC_TOKEN_FILE_PATH="$OIDC_FILE"
+            unset ARM_USE_CLI || true
+
+            cd "$(tf_working_dir)"
+            terraform init \
+              -backend-config="resource_group_name=$(backend_rg)" \
+              -backend-config="storage_account_name=$(backend_storage)" \
+              -backend-config="container_name=$(backend_container)" \
+              -backend-config="key=$(backend_key)"
+
+            terraform workspace select "$(environmentName)" || terraform workspace new "$(environmentName)"
+            if [ -f "../env/$(environmentName).tfvars" ]; then
+              terraform destroy -var-file="../env/$(environmentName).tfvars" -auto-approve -lock-timeout=20m
+            else
+              terraform destroy -auto-approve -lock-timeout=20m
+            fi
