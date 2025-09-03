@@ -43,7 +43,7 @@ stages:
         fetchDepth: 0
 
       - task: AzureCLI@2
-        displayName: Ensure container existe
+        displayName: Verificar si container existe
         inputs:
           azureSubscription: $(serviceConnection)
           addSpnToEnvironment: true
@@ -58,7 +58,7 @@ stages:
               --public-access off 1>/dev/null || true
 
       - task: AzureCLI@2
-        displayName: Terraform plan (OIDC + ARM_*)
+        displayName: Terraform plan
         inputs:
           azureSubscription: $(serviceConnection)
           addSpnToEnvironment: true
@@ -114,7 +114,7 @@ stages:
             fi
 
       - task: PublishBuildArtifacts@1
-        displayName: Publicar tfplan (artefacto del run)
+        displayName: Publicar tfplan
         inputs:
           pathToPublish: $(Pipeline.Workspace)/tfplan.tfplan
           artifactName: tfplan
@@ -137,7 +137,7 @@ stages:
 
       # Resolver PR del commit de merge (API ADO con PAT) y bajar su plan
       - task: AzureCLI@2
-        displayName: Resolver PR y descargar plan del PR (con PAT, robusto)
+        displayName: PR
         env:
           ADO_PAT: $(ADO_PAT)   # definir como secret (scope: Code Read)
         inputs:
@@ -206,7 +206,7 @@ stages:
             echo "##vso[task.setvariable variable=PR_PLAN_PATH]$PLAN_OUT"
 
       - task: AzureCLI@2
-        displayName: Terraform apply (reusar plan del PR si existe; sino re-plan)
+        displayName: Terraform apply
         inputs:
           azureSubscription: $(serviceConnection)
           addSpnToEnvironment: true
@@ -266,7 +266,7 @@ stages:
       - checkout: self
         fetchDepth: 0
       - task: AzureCLI@2
-        displayName: Terraform destroy (OIDC + ARM_*)
+        displayName: Terraform destroy
         inputs:
           azureSubscription: $(serviceConnection)
           addSpnToEnvironment: true
