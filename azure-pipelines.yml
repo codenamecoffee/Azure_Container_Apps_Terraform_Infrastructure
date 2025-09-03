@@ -1,10 +1,10 @@
-# Ejecuta CI en main. La validación de PR se dispara con Branch Policies (Build validation).
+# CI solo en main; la validación de PR la dispara la Branch Policy.
 trigger:
   branches:
     include:
       - main
 
-# Evita doble ejecución: el PR lo dispara la política, no el YAML.
+# Evitamos doble ejecución: PR no lo dispara el YAML.
 pr: none
 
 resources:
@@ -28,15 +28,15 @@ variables:
 
 stages:
 # =========================
-# PLAN (se ejecuta en PR y main)
+# PLAN (SOLO en PR)
 # =========================
 - stage: Plan
   displayName: Validate & Plan
+  condition: eq(variables['Build.Reason'], 'PullRequest')
   jobs:
   - job: plan
     displayName: Terraform Plan
-    pool:
-      name: Default
+    pool: { name: Default }
     container: runner
     steps:
       - checkout: self
@@ -69,12 +69,12 @@ stages:
 
             terraform -version || { echo "Terraform no está en PATH en la imagen"; exit 1; }
 
-            # OIDC -> archivo para ARM_OIDC_TOKEN_FILE_PATH
+            # OIDC → archivo para ARM_OIDC_TOKEN_FILE_PATH
             OIDC_FILE="$(Pipeline.Workspace)/ado_oidc.token"
             umask 077
             printf '%s' "${idToken:-}" > "$OIDC_FILE"
 
-            # Auth para backend y provider (sin usar az account get-access-token)
+            # Auth para backend y provider (sin usar 'az account get-access-token')
             export ARM_USE_OIDC=true
             export ARM_TENANT_ID="$tenantId"
             export ARM_CLIENT_ID="$servicePrincipalId"
@@ -101,18 +101,16 @@ stages:
               terraform plan -out="$PLAN_OUT" -lock-timeout=20m
             fi
 
-            # Un único plan por PR (si corre como validación de PR via Branch Policy)
-            if [ "$(Build.Reason)" = "PullRequest" ]; then
-              PR_ID="$(System.PullRequest.PullRequestId)"
-              if [ -n "$PR_ID" ]; then
-                BLOB_PR="plans/pr-${PR_ID}.tfplan"
-                az storage blob upload \
-                  --account-name "$(backend_storage)" \
-                  --container-name "$(backend_container)" \
-                  --name "$BLOB_PR" \
-                  --file "$PLAN_OUT" \
-                  --auth-mode login --overwrite
-              fi
+            # Guardar UN plan por PR
+            PR_ID="$(System.PullRequest.PullRequestId)"
+            if [ -n "$PR_ID" ]; then
+              BLOB_PR="plans/pr-${PR_ID}.tfplan"
+              az storage blob upload \
+                --account-name "$(backend_storage)" \
+                --container-name "$(backend_container)" \
+                --name "$BLOB_PR" \
+                --file "$PLAN_OUT" \
+                --auth-mode login --overwrite
             fi
 
       - task: PublishBuildArtifacts@1
@@ -123,26 +121,25 @@ stages:
           publishLocation: Container
 
 # =========================
-# APPLY (sólo en main)
+# APPLY (SOLO en main) — independiente del stage Plan
 # =========================
 - stage: Apply
   displayName: Apply (main)
-  dependsOn: Plan
+  dependsOn: []   # no dependemos del stage Plan (corren en runs distintos)
   condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
   jobs:
   - job: apply
-    pool:
-      name: Default
+    pool: { name: Default }
     container: runner
     steps:
       - checkout: self
         fetchDepth: 0
 
-      # Resolver PR de origen del commit de merge (API ADO con PAT) y descargar su plan único
+      # Resolver PR del commit de merge (API ADO con PAT) y bajar su plan
       - task: AzureCLI@2
-        displayName: Resolver PR y descargar plan del PR (con PAT)
+        displayName: Resolver PR y descargar plan del PR (con PAT, robusto)
         env:
-          ADO_PAT: $(ADO_PAT)   # definir como secret en el pipeline (scope: Code Read)
+          ADO_PAT: $(ADO_PAT)   # definir como secret (scope: Code Read)
         inputs:
           azureSubscription: $(serviceConnection)
           addSpnToEnvironment: true
@@ -150,6 +147,11 @@ stages:
           scriptLocation: inlineScript
           inlineScript: |
             set -euo pipefail
+
+            if [ -z "${ADO_PAT:-}" ]; then
+              echo "No hay ADO_PAT; se hará fallback a re-plan."
+              exit 0
+            fi
 
             ORG_URL="$(System.CollectionUri)"
             PROJ="$(System.TeamProject)"
@@ -160,39 +162,51 @@ stages:
               apt-get update -y >/dev/null && apt-get install -y jq >/dev/null
             fi
 
-            # repoId por nombre
-            REPOS_JSON="$(curl -sS -u :${ADO_PAT} \
-              "${ORG_URL}${PROJ}/_apis/git/repositories?api-version=7.0")"
+            # Helper para curl con chequeo de HTTP
+            apicall() {
+              local url="$1"
+              local out http
+              out="$(mktemp)"; http="$(curl -sS -u :${ADO_PAT} -H 'Accept: application/json' -o "$out" -w '%{http_code}' "$url")" || http=000
+              if [ "$http" != "200" ]; then
+                echo "API ${url} → HTTP $http; fallback a re-plan."
+                rm -f "$out"; return 1
+              fi
+              cat "$out"; rm -f "$out"
+            }
+
+            # 1) repoId por nombre
+            REPOS_JSON="$(apicall "${ORG_URL}${PROJ}/_apis/git/repositories?api-version=7.0")" || exit 0
             REPO_ID="$(echo "$REPOS_JSON" | jq -r --arg NAME "$REPO_NAME" '.value[] | select(.name==$NAME) | .id')"
             if [ -z "${REPO_ID:-}" ] || [ "$REPO_ID" = "null" ]; then
-              echo "No repoId; fallback a re-plan."
-              exit 0
+              echo "No repoId; fallback a re-plan."; exit 0
             fi
 
-            # PR asociado al commit de merge
-            PRS_JSON="$(curl -sS -u :${ADO_PAT} \
-              "${ORG_URL}${PROJ}/_apis/git/repositories/${REPO_ID}/commits/${COMMIT}/pullRequests?api-version=7.0")"
+            # 2) PR asociado al commit de merge
+            PRS_JSON="$(apicall "${ORG_URL}${PROJ}/_apis/git/repositories/${REPO_ID}/commits/${COMMIT}/pullRequests?api-version=7.0")" || exit 0
             PR_ID="$(echo "$PRS_JSON" | jq -r '.value[0].pullRequestId // empty')"
             if [ -z "${PR_ID:-}" ]; then
-              echo "Sin PR asociado; fallback a re-plan."
-              exit 0
+              echo "Sin PR asociado; fallback a re-plan."; exit 0
             fi
-            echo "PR: #$PR_ID"
+            echo "PR asociado: #$PR_ID"
 
             BLOB_PR="plans/pr-${PR_ID}.tfplan"
             PLAN_OUT="$(Pipeline.Workspace)/tfplan-pr.tfplan"
 
-            az storage blob download \
-              --account-name "$(backend_storage)" \
-              --container-name "$(backend_container)" \
-              --name "$BLOB_PR" \
-              --file "$PLAN_OUT" \
-              --auth-mode login --no-progress
+            # Descargar plan; si falla, fallback silencioso a re-plan
+            if ! az storage blob download \
+                  --account-name "$(backend_storage)" \
+                  --container-name "$(backend_container)" \
+                  --name "$BLOB_PR" \
+                  --file "$PLAN_OUT" \
+                  --auth-mode login --no-progress 2>/dev/null; then
+              echo "No se pudo descargar $BLOB_PR; fallback a re-plan."
+              exit 0
+            fi
 
             echo "##vso[task.setvariable variable=PR_PLAN_PATH]$PLAN_OUT"
 
       - task: AzureCLI@2
-        displayName: Terraform apply (reusar plan del PR si existe, sino re-plan)
+        displayName: Terraform apply (reusar plan del PR si existe; sino re-plan)
         inputs:
           azureSubscription: $(serviceConnection)
           addSpnToEnvironment: true
@@ -246,13 +260,11 @@ stages:
   condition: and(succeeded(), eq(variables['DO_DESTROY'], 'true'))
   jobs:
   - job: destroy
-    pool:
-      name: Default
+    pool: { name: Default }
     container: runner
     steps:
       - checkout: self
         fetchDepth: 0
-
       - task: AzureCLI@2
         displayName: Terraform destroy (OIDC + ARM_*)
         inputs:
@@ -262,27 +274,22 @@ stages:
           scriptLocation: inlineScript
           inlineScript: |
             set -euo pipefail
-
             terraform -version || { echo "Terraform no está en PATH en la imagen"; exit 1; }
-
             OIDC_FILE="$(Pipeline.Workspace)/ado_oidc.token"
             umask 077
             printf '%s' "${idToken:-}" > "$OIDC_FILE"
-
             export ARM_USE_OIDC=true
             export ARM_TENANT_ID="$tenantId"
             export ARM_CLIENT_ID="$servicePrincipalId"
             export ARM_SUBSCRIPTION_ID="$(az account show --query id -o tsv)"
             export ARM_OIDC_TOKEN_FILE_PATH="$OIDC_FILE"
             unset ARM_USE_CLI || true
-
             cd "$(tf_working_dir)"
             terraform init \
               -backend-config="resource_group_name=$(backend_rg)" \
               -backend-config="storage_account_name=$(backend_storage)" \
               -backend-config="container_name=$(backend_container)" \
               -backend-config="key=$(backend_key)"
-
             terraform workspace select "$(environmentName)" || terraform workspace new "$(environmentName)"
             if [ -f "../env/$(environmentName).tfvars" ]; then
               terraform destroy -var-file="../env/$(environmentName).tfvars" -auto-approve -lock-timeout=20m
