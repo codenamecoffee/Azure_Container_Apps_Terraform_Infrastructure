@@ -21,7 +21,7 @@ provider "azurerm" {
 # === Demo simple: Resource Group + Storage Account (no es el backend) ===
 
 resource "azurerm_resource_group" "rg" {
-  name     = var.rg_name
+  name     = "pepe"
   location = var.location
   tags     = var.tags
 }
