@@ -3,7 +3,7 @@ terraform {
   required_providers {
     azurerm = {
       source  = "hashicorp/azurerm"
-      version = "~> 3.0"
+      version = "~> 4.0"
     }
     random = {
       source  = "hashicorp/random"
@@ -18,11 +18,5 @@ provider "azurerm" {
   features {}
 }
 
-# === Demo simple: Resource Group + Storage Account (no es el backend) ===
 
-resource "azurerm_resource_group" "rg" {
-  name     = "pepe"
-  location = var.location
-  tags     = var.tags
-}
 
