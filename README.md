@@ -1,51 +1,22 @@
-# 🚀 Terraform en Azure DevOps (Fork-Friendly)
+# Infra Lab — Terraform + Azure Container Apps (ACA)
 
-Este proyecto es un **esqueleto** para correr Terraform en **Azure DevOps** con **state remoto en Azure Storage**.
-Cada persona que haga **fork** obtiene su **propio container de state**, pero todos comparten la misma **Storage Account**.
+Este repositorio es el **repo de infraestructura** del taller. Cada equipo debe **desplegar su app** aquí usando **Terraform** y **Azure Container Apps**.
 
-## 📂 Estructura
-```
-.
-├── azure-pipelines.yml     # Pipeline de Azure DevOps
-├── infra/                  # Configuración Terraform
-│   ├── main.tf
-│   └── variables.tf
-└── env/
-    └── dev.tfvars
-```
+---
 
-## ⚙️ Prerrequisitos
-1. **Azure Subscription** y una **Storage Account** compartida (ej.: RG=`rg-tfstate`, SA=`stterraformstate123`).
-2. **Service Connection** en Azure DevOps (ARM) con permisos para crear contenedores en la SA (RBAC: *Storage Blob Data Contributor*).
-3. Crear un **Environment** en ADO (ej. `infra-dev`) para approvals si querés.
+## Qué ya está creado (compartido)
 
-## ▶️ Cómo funciona
-- La pipeline deriva un **container único por fork** desde `Build.Repository.Name`, lo normaliza (minúsculas y guiones) y crea el container si no existe.
-- `terraform init` recibe **-backend-config** con: RG, SA, *container por fork* y `key` (ruta `<repo>/<env>.tfstate`).
+- **Azure Container Apps Environment** (consumption, público) — usarlo para todas las apps.
 
-## 🧪 Probar rápido
-1. Hacé **fork** del repo.
-2. En Azure DevOps, crea la pipeline apuntando a `azure-pipelines.yml`.
-3. Ejecutá: la pipeline creará tu **container** y hará `plan` (en PR) y `apply` (solo `main`).
+---
 
-## 🔐 Buenas prácticas
-- No subas `terraform.tfstate` ni `*.tfplan` al repo.
-- Usa `tfvars` por entorno y mantén secrets en **Variable Groups** o **Key Vault**.
-- Commitea `.terraform.lock.hcl` para fijar versiones de providers.
+## Flujo de trabajo (obligatorio)
+
+1. Crear rama: `feature/<equipo>`.
+2. Agregar/usar tu **módulo** desde la carpeta de infraestructura, llamandolo desde su repo (no copiar el modulo a este repo, deben poner la url de su repo en source).
+3. Abrir **Pull Request** y **agregar a _Gonzalo Rodriguez_** como reviewer.
+4. La pipeline corre `plan` al abrir el MR. Al aprobar y hacer merge a `main`, corre `apply`.
+
+---
 
 
-## 🧩 Unicidad por proyecto + repo
-La pipeline deriva el **container** usando `$(System.TeamProject)-$(Build.Repository.Name)`,
-lo normaliza y lo recorta a 63 chars. Así, dos repos con el mismo nombre en proyectos distintos
-no comparten el mismo container de state.
-
-
-### 🧹 Destroy manual
-La pipeline incluye un **stage `Destroy`** que sólo corre cuando lo lanzás **manualmente** con la variable `DO_DESTROY=true`.
-
-**Cómo usarlo en Azure DevOps:**
-1. Pipelines → Run pipeline → **Variables** → agrega `DO_DESTROY=true`.
-2. Ejecutá. El stage `Destroy` usará el **mismo backend** (container derivado por proyecto+repo) y hará `terraform destroy` en el `workspace` del entorno (`environmentName`).
-3. El job está asociado al **Environment** especificado para que puedas requerir **aprobaciones** antes de destruir.
-
-> Si tenés `env/dev.tfvars` (o el que corresponda), el destroy lo carga automáticamente.
