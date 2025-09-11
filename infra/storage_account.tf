@@ -1,5 +1,5 @@
 resource "azurerm_storage_account" "api_storage" {
-  name                     = "school-of-api-storage"
+  name                     = "schoolofapistorage"
   resource_group_name      = var.rg_name
   location                 = var.location
   account_tier             = "Standard"
