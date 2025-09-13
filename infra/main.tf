@@ -19,7 +19,7 @@ provider "azurerm" {
 }
 
 module "fg_mg_movie_shop" {
-  source = "git::git@ssh.dev.azure.com:v3/EndavaMVD/SchoolOf2025/mg_fg_terraform_module.git?ref=v1.0.0"
+  source = "git::https://dev.azure.com/EndavaMVD/SchoolOf2025/_git/mg_fg_terraform_module?ref=v1.0.0"
 
   # Required variables
   app_name                     = "fg-mg-movie-shop"
