@@ -47,6 +47,7 @@ stages:
         displayName: "Install org-wide SSH key"
         inputs:
           sshKeySecureFile: 'ado-runner-private'
+          hostname: 'ssh.dev.azure.com'
 
       - script: |
           set -euo pipefail
@@ -154,6 +155,7 @@ stages:
         displayName: "Install org-wide SSH key"
         inputs:
           sshKeySecureFile: 'ado-runner-private'
+          hostname: 'ssh.dev.azure.com'
 
       - script: |
           set -euo pipefail
@@ -299,6 +301,7 @@ stages:
         displayName: "Install org-wide SSH key"
         inputs:
           sshKeySecureFile: 'ado-runner-private'
+          hostname: 'ssh.dev.azure.com'
 
       - script: |
           set -euo pipefail
