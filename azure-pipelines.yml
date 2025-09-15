@@ -42,6 +42,20 @@ stages:
       - checkout: self
         fetchDepth: 0
 
+      # --- [SSH] Instala clave org-wide para clonar módulos por SSH ---
+      - task: InstallSSHKey@0
+        displayName: "Install org-wide SSH key"
+        inputs:
+          sshKeySecureFile: 'ado-runner-private'
+
+      - script: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          ssh-keyscan -H ssh.dev.azure.com >> ~/.ssh/known_hosts
+          chmod 700 ~/.ssh
+          chmod 600 ~/.ssh/known_hosts
+        displayName: "Trust ssh.dev.azure.com"
+
       - task: AzureCLI@2
         displayName: Verificar si container existe
         inputs:
@@ -125,7 +139,7 @@ stages:
 # =========================
 - stage: Apply
   displayName: Apply (main)
-  dependsOn: []   # no dependemos del stage Plan (corren en runs distintos)
+  dependsOn: []
   condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
   jobs:
   - job: apply
@@ -134,6 +148,20 @@ stages:
     steps:
       - checkout: self
         fetchDepth: 0
+
+      # --- [SSH] Instala clave org-wide para clonar módulos por SSH ---
+      - task: InstallSSHKey@0
+        displayName: "Install org-wide SSH key"
+        inputs:
+          sshKeySecureFile: 'ado-runner-private'
+
+      - script: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          ssh-keyscan -H ssh.dev.azure.com >> ~/.ssh/known_hosts
+          chmod 700 ~/.ssh
+          chmod 600 ~/.ssh/known_hosts
+        displayName: "Trust ssh.dev.azure.com"
 
       # Resolver PR del commit de merge (API ADO con PAT) y bajar su plan
       - task: AzureCLI@2
@@ -170,7 +198,7 @@ stages:
               if [ "$http" != "200" ]; then
                 echo "API ${url} → HTTP $http; fallback a re-plan."
                 rm -f "$out"; return 1
-              fi
+              }
               cat "$out"; rm -f "$out"
             }
 
@@ -265,6 +293,21 @@ stages:
     steps:
       - checkout: self
         fetchDepth: 0
+
+      # --- [SSH] Instala clave org-wide para clonar módulos por SSH ---
+      - task: InstallSSHKey@0
+        displayName: "Install org-wide SSH key"
+        inputs:
+          sshKeySecureFile: 'ado-runner-private'
+
+      - script: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          ssh-keyscan -H ssh.dev.azure.com >> ~/.ssh/known_hosts
+          chmod 700 ~/.ssh
+          chmod 600 ~/.ssh/known_hosts
+        displayName: "Trust ssh.dev.azure.com"
+
       - task: AzureCLI@2
         displayName: Terraform destroy
         inputs:
