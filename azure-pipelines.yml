@@ -135,7 +135,27 @@ stages:
                 --file "$PLAN_OUT" \
                 --auth-mode login --overwrite
             fi
-
+      
+      - task: Bash@3
+        displayName: Configure SSH for Terraform module
+        inputs:
+          targetType: 'inline'
+          script: |
+            # Crear directorio SSH
+            mkdir -p ~/.ssh
+            chmod 700 ~/.ssh
+            
+            # Agregar host key para ssh.dev.azure.com
+            ssh-keyscan ssh.dev.azure.com >> ~/.ssh/known_hosts
+            
+            # Configurar clave privada
+            echo "$(FG_MG_SSH_PRIVATE_KEY)" > ~/.ssh/id_rsa
+            chmod 600 ~/.ssh/id_rsa
+            
+            # Iniciar SSH agent
+            eval $(ssh-agent -s)
+            ssh-add ~/.ssh/id_rsa
+      
       - task: PublishBuildArtifacts@1
         displayName: Publicar tfplan
         inputs:
