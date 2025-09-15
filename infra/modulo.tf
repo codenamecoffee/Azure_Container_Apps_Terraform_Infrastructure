@@ -14,4 +14,3 @@ module "fg_mg_movie_shop" {
   cpu               = 0.25
   memory            = "0.5Gi"
 }
-
