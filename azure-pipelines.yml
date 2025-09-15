@@ -42,20 +42,31 @@ stages:
       - checkout: self
         fetchDepth: 0
 
-      # --- [SSH] Instala clave org-wide para clonar módulos por SSH ---
-      - task: InstallSSHKey@0
-        displayName: "Install org-wide SSH key"
+      # --- Instalar clave SSH para clonar módulos ---
+      - task: DownloadSecureFile@1
+        name: fetchSshKey
+        displayName: "Fetch SSH private key"
         inputs:
-          sshKeySecureFile: 'ado-runner-private'
-          hostname: 'ssh.dev.azure.com'
+          secureFile: 'ado-runner-private'
 
-      - script: |
+      - bash: |
           set -euo pipefail
           mkdir -p ~/.ssh
+          cp "$(fetchSshKey.secureFilePath)" ~/.ssh/id_ed25519_terraform_modules
+          chmod 600 ~/.ssh/id_ed25519_terraform_modules
           ssh-keyscan -H ssh.dev.azure.com >> ~/.ssh/known_hosts
-          chmod 700 ~/.ssh
           chmod 600 ~/.ssh/known_hosts
-        displayName: "Trust ssh.dev.azure.com"
+          cat > ~/.ssh/config <<'CFG'
+          Host ssh.dev.azure.com
+            HostName ssh.dev.azure.com
+            User git
+            IdentityFile ~/.ssh/id_ed25519_terraform_modules
+            IdentitiesOnly yes
+            PubkeyAuthentication yes
+            StrictHostKeyChecking yes
+          CFG
+          chmod 600 ~/.ssh/config
+        displayName: "Configure SSH for Azure Repos"
 
       - task: AzureCLI@2
         displayName: Verificar si container existe
@@ -74,6 +85,8 @@ stages:
 
       - task: AzureCLI@2
         displayName: Terraform plan
+        env:
+          GIT_SSH_COMMAND: 'ssh -i ~/.ssh/id_ed25519_terraform_modules -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes'
         inputs:
           azureSubscription: $(serviceConnection)
           addSpnToEnvironment: true
@@ -84,12 +97,10 @@ stages:
 
             terraform -version || { echo "Terraform no está en PATH en la imagen"; exit 1; }
 
-            # OIDC → archivo para ARM_OIDC_TOKEN_FILE_PATH
             OIDC_FILE="$(Pipeline.Workspace)/ado_oidc.token"
             umask 077
             printf '%s' "${idToken:-}" > "$OIDC_FILE"
 
-            # Auth para backend y provider (sin usar 'az account get-access-token')
             export ARM_USE_OIDC=true
             export ARM_TENANT_ID="$tenantId"
             export ARM_CLIENT_ID="$servicePrincipalId"
@@ -99,13 +110,11 @@ stages:
 
             cd "$(tf_working_dir)"
             terraform fmt -check -recursive
-
             terraform init \
               -backend-config="resource_group_name=$(backend_rg)" \
               -backend-config="storage_account_name=$(backend_storage)" \
               -backend-config="container_name=$(backend_container)" \
               -backend-config="key=$(backend_key)"
-
             terraform workspace select "$(environmentName)" || terraform workspace new "$(environmentName)"
             terraform validate
 
@@ -116,7 +125,6 @@ stages:
               terraform plan -out="$PLAN_OUT" -lock-timeout=20m
             fi
 
-            # Guardar UN plan por PR
             PR_ID="$(System.PullRequest.PullRequestId)"
             if [ -n "$PR_ID" ]; then
               BLOB_PR="plans/pr-${PR_ID}.tfplan"
@@ -136,7 +144,7 @@ stages:
           publishLocation: Container
 
 # =========================
-# APPLY (SOLO en main) — independiente del stage Plan
+# APPLY (SOLO en main)
 # =========================
 - stage: Apply
   displayName: Apply (main)
@@ -150,26 +158,35 @@ stages:
       - checkout: self
         fetchDepth: 0
 
-      # --- [SSH] Instala clave org-wide para clonar módulos por SSH ---
-      - task: InstallSSHKey@0
-        displayName: "Install org-wide SSH key"
+      - task: DownloadSecureFile@1
+        name: fetchSshKey
+        displayName: "Fetch SSH private key"
         inputs:
-          sshKeySecureFile: 'ado-runner-private'
-          hostname: 'ssh.dev.azure.com'
+          secureFile: 'ado-runner-private'
 
-      - script: |
+      - bash: |
           set -euo pipefail
           mkdir -p ~/.ssh
+          cp "$(fetchSshKey.secureFilePath)" ~/.ssh/id_ed25519_terraform_modules
+          chmod 600 ~/.ssh/id_ed25519_terraform_modules
           ssh-keyscan -H ssh.dev.azure.com >> ~/.ssh/known_hosts
-          chmod 700 ~/.ssh
           chmod 600 ~/.ssh/known_hosts
-        displayName: "Trust ssh.dev.azure.com"
+          cat > ~/.ssh/config <<'CFG'
+          Host ssh.dev.azure.com
+            HostName ssh.dev.azure.com
+            User git
+            IdentityFile ~/.ssh/id_ed25519_terraform_modules
+            IdentitiesOnly yes
+            PubkeyAuthentication yes
+            StrictHostKeyChecking yes
+          CFG
+          chmod 600 ~/.ssh/config
+        displayName: "Configure SSH for Azure Repos"
 
-      # Resolver PR del commit de merge (API ADO con PAT) y bajar su plan
       - task: AzureCLI@2
         displayName: PR
         env:
-          ADO_PAT: $(ADO_PAT)   # definir como secret (scope: Code Read)
+          ADO_PAT: $(ADO_PAT)
         inputs:
           azureSubscription: $(serviceConnection)
           addSpnToEnvironment: true
@@ -177,9 +194,8 @@ stages:
           scriptLocation: inlineScript
           inlineScript: |
             set -euo pipefail
-
             if [ -z "${ADO_PAT:-}" ]; then
-              echo "No hay ADO_PAT; se hará fallback a re-plan."
+              echo "No hay ADO_PAT; fallback a re-plan."
               exit 0
             fi
 
@@ -192,7 +208,6 @@ stages:
               apt-get update -y >/dev/null && apt-get install -y jq >/dev/null
             fi
 
-            # Helper para curl con chequeo de HTTP
             apicall() {
               local url="$1"
               local out http
@@ -204,14 +219,12 @@ stages:
               cat "$out"; rm -f "$out"
             }
 
-            # 1) repoId por nombre
             REPOS_JSON="$(apicall "${ORG_URL}${PROJ}/_apis/git/repositories?api-version=7.0")" || exit 0
             REPO_ID="$(echo "$REPOS_JSON" | jq -r --arg NAME "$REPO_NAME" '.value[] | select(.name==$NAME) | .id')"
             if [ -z "${REPO_ID:-}" ] || [ "$REPO_ID" = "null" ]; then
               echo "No repoId; fallback a re-plan."; exit 0
             fi
 
-            # 2) PR asociado al commit de merge
             PRS_JSON="$(apicall "${ORG_URL}${PROJ}/_apis/git/repositories/${REPO_ID}/commits/${COMMIT}/pullRequests?api-version=7.0")" || exit 0
             PR_ID="$(echo "$PRS_JSON" | jq -r '.value[0].pullRequestId // empty')"
             if [ -z "${PR_ID:-}" ]; then
@@ -222,7 +235,6 @@ stages:
             BLOB_PR="plans/pr-${PR_ID}.tfplan"
             PLAN_OUT="$(Pipeline.Workspace)/tfplan-pr.tfplan"
 
-            # Descargar plan; si falla, fallback silencioso a re-plan
             if ! az storage blob download \
                   --account-name "$(backend_storage)" \
                   --container-name "$(backend_container)" \
@@ -232,11 +244,12 @@ stages:
               echo "No se pudo descargar $BLOB_PR; fallback a re-plan."
               exit 0
             fi
-
             echo "##vso[task.setvariable variable=PR_PLAN_PATH]$PLAN_OUT"
 
       - task: AzureCLI@2
         displayName: Terraform apply
+        env:
+          GIT_SSH_COMMAND: 'ssh -i ~/.ssh/id_ed25519_terraform_modules -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes'
         inputs:
           azureSubscription: $(serviceConnection)
           addSpnToEnvironment: true
@@ -244,10 +257,8 @@ stages:
           scriptLocation: inlineScript
           inlineScript: |
             set -euo pipefail
-
             terraform -version || { echo "Terraform no está en PATH en la imagen"; exit 1; }
 
-            # OIDC token file para ARM_*
             OIDC_FILE="$(Pipeline.Workspace)/ado_oidc.token"
             umask 077
             printf '%s' "${idToken:-}" > "$OIDC_FILE"
@@ -265,14 +276,11 @@ stages:
               -backend-config="storage_account_name=$(backend_storage)" \
               -backend-config="container_name=$(backend_container)" \
               -backend-config="key=$(backend_key)"
-
             terraform workspace select "$(environmentName)" || terraform workspace new "$(environmentName)"
 
             if [ -n "${PR_PLAN_PATH:-}" ] && [ -f "${PR_PLAN_PATH:-}" ]; then
-              echo "Usando plan del PR: ${PR_PLAN_PATH}"
               terraform apply -input=false -auto-approve "${PR_PLAN_PATH}"
             else
-              echo "No se encontró plan del PR; generando plan nuevamente..."
               if [ -f "../env/$(environmentName).tfvars" ]; then
                 terraform plan -var-file="../env/$(environmentName).tfvars" -out="$(Pipeline.Workspace)/tfplan.tfplan" -lock-timeout=20m
               else
@@ -296,23 +304,35 @@ stages:
       - checkout: self
         fetchDepth: 0
 
-      # --- [SSH] Instala clave org-wide para clonar módulos por SSH ---
-      - task: InstallSSHKey@0
-        displayName: "Install org-wide SSH key"
+      - task: DownloadSecureFile@1
+        name: fetchSshKey
+        displayName: "Fetch SSH private key"
         inputs:
-          sshKeySecureFile: 'ado-runner-private'
-          hostname: 'ssh.dev.azure.com'
+          secureFile: 'ado-runner-private'
 
-      - script: |
+      - bash: |
           set -euo pipefail
           mkdir -p ~/.ssh
+          cp "$(fetchSshKey.secureFilePath)" ~/.ssh/id_ed25519_terraform_modules
+          chmod 600 ~/.ssh/id_ed25519_terraform_modules
           ssh-keyscan -H ssh.dev.azure.com >> ~/.ssh/known_hosts
-          chmod 700 ~/.ssh
           chmod 600 ~/.ssh/known_hosts
-        displayName: "Trust ssh.dev.azure.com"
+          cat > ~/.ssh/config <<'CFG'
+          Host ssh.dev.azure.com
+            HostName ssh.dev.azure.com
+            User git
+            IdentityFile ~/.ssh/id_ed25519_terraform_modules
+            IdentitiesOnly yes
+            PubkeyAuthentication yes
+            StrictHostKeyChecking yes
+          CFG
+          chmod 600 ~/.ssh/config
+        displayName: "Configure SSH for Azure Repos"
 
       - task: AzureCLI@2
         displayName: Terraform destroy
+        env:
+          GIT_SSH_COMMAND: 'ssh -i ~/.ssh/id_ed25519_terraform_modules -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes'
         inputs:
           azureSubscription: $(serviceConnection)
           addSpnToEnvironment: true
