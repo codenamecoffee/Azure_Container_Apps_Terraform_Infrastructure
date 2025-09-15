@@ -236,6 +236,7 @@ stages:
               if [ "$http" != "200" ]; then
                 echo "API ${url} → HTTP $http; fallback a re-plan."
                 rm -f "$out"; return 1
+              }
               fi
               cat "$out"; rm -f "$out"
             }
