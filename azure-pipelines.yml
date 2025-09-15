@@ -208,6 +208,7 @@ stages:
               apt-get update -y >/dev/null && apt-get install -y jq >/dev/null
             fi
 
+            # Helper para curl con chequeo de HTTP
             apicall() {
               local url="$1"
               local out http
@@ -215,16 +216,18 @@ stages:
               if [ "$http" != "200" ]; then
                 echo "API ${url} → HTTP $http; fallback a re-plan."
                 rm -f "$out"; return 1
-              }
+              fi
               cat "$out"; rm -f "$out"
             }
 
+            # 1) repoId por nombre
             REPOS_JSON="$(apicall "${ORG_URL}${PROJ}/_apis/git/repositories?api-version=7.0")" || exit 0
             REPO_ID="$(echo "$REPOS_JSON" | jq -r --arg NAME "$REPO_NAME" '.value[] | select(.name==$NAME) | .id')"
             if [ -z "${REPO_ID:-}" ] || [ "$REPO_ID" = "null" ]; then
               echo "No repoId; fallback a re-plan."; exit 0
             fi
 
+            # 2) PR asociado al commit de merge
             PRS_JSON="$(apicall "${ORG_URL}${PROJ}/_apis/git/repositories/${REPO_ID}/commits/${COMMIT}/pullRequests?api-version=7.0")" || exit 0
             PR_ID="$(echo "$PRS_JSON" | jq -r '.value[0].pullRequestId // empty')"
             if [ -z "${PR_ID:-}" ]; then
@@ -235,6 +238,7 @@ stages:
             BLOB_PR="plans/pr-${PR_ID}.tfplan"
             PLAN_OUT="$(Pipeline.Workspace)/tfplan-pr.tfplan"
 
+            # Descargar plan; si falla, fallback silencioso a re-plan
             if ! az storage blob download \
                   --account-name "$(backend_storage)" \
                   --container-name "$(backend_container)" \
