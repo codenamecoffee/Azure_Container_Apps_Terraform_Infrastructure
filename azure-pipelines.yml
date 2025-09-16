@@ -42,15 +42,6 @@ stages:
       - checkout: self
         fetchDepth: 0
 
-      - bash: |
-          set -euo pipefail
-          T_VERSION="1.13.2"
-          curl -sLo terraform_${T_VERSION}_linux_amd64.zip https://releases.hashicorp.com/terraform/${T_VERSION}/terraform_${T_VERSION}_linux_amd64.zip
-          unzip -o terraform_${T_VERSION}_linux_amd64.zip
-          mv terraform /usr/local/bin/terraform
-          terraform -version
-        displayName: "Instalar/Actualizar Terraform"
-
       # --- Instalar clave SSH para clonar módulos ---
       - task: DownloadSecureFile@1
         name: fetchSshKey
@@ -166,15 +157,6 @@ stages:
     steps:
       - checkout: self
         fetchDepth: 0
-
-      - bash: |
-          set -euo pipefail
-          T_VERSION="1.13.2"
-          curl -sLo terraform_${T_VERSION}_linux_amd64.zip https://releases.hashicorp.com/terraform/${T_VERSION}/terraform_${T_VERSION}_linux_amd64.zip
-          unzip -o terraform_${T_VERSION}_linux_amd64.zip
-          mv terraform /usr/local/bin/terraform
-          terraform -version
-        displayName: "Instalar/Actualizar Terraform"
 
       - bash: |
           set -euo pipefail
@@ -334,15 +316,6 @@ stages:
     steps:
       - checkout: self
         fetchDepth: 0
-
-      - bash: |
-          set -euo pipefail
-          T_VERSION="1.13.2"
-          curl -sLo terraform_${T_VERSION}_linux_amd64.zip https://releases.hashicorp.com/terraform/${T_VERSION}/terraform_${T_VERSION}_linux_amd64.zip
-          unzip -o terraform_${T_VERSION}_linux_amd64.zip
-          mv terraform /usr/local/bin/terraform
-          terraform -version
-        displayName: "Instalar/Actualizar Terraform"
 
       - task: DownloadSecureFile@1
         name: fetchSshKey
