@@ -3,6 +3,7 @@ trigger:
   branches:
     include:
       - main
+      - feature/*
 
 # Evitamos doble ejecución: PR no lo dispara el YAML.
 pr: none
@@ -157,15 +158,6 @@ stages:
     steps:
       - checkout: self
         fetchDepth: 0
-
-      - bash: |
-          set -euo pipefail
-          T_VERSION="1.13.2"
-          wget -q https://releases.hashicorp.com/terraform/${T_VERSION}/terraform_${T_VERSION}_linux_amd64.zip
-          unzip -o terraform_${T_VERSION}_linux_amd64.zip
-          mv terraform /usr/local/bin/terraform
-          terraform -version
-        displayName: "Instalar/Actualizar Terraform"
 
       - task: DownloadSecureFile@1
         name: fetchSshKey
