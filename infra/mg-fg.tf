@@ -19,3 +19,4 @@ output "fg_mg_api_url" {
   description = "Public URL to access the FG-MG Movie Shop API"
   value = module.fg_mg_movie_shop.app_url
 }
+
