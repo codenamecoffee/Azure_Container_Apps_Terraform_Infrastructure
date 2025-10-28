@@ -1,6 +1,7 @@
 # 🏗️ Azure Container Apps Terraform Infrastructure
 
 This repository contains the **infrastructure code** used during the *School of Software Engineering (Endava, 2025)* training program final lab.  
+
 It was designed to consume a custom Terraform module that deployed containerized applications into a shared **Azure Container Apps Environment**.
 
 > ⚙️ **Note:**  
