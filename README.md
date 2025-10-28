@@ -7,7 +7,7 @@ It was designed to consume a custom Terraform module that deployed containerized
 > This environment and all Azure resources were part of a temporary training lab and therefore no longer exist.
 > However, the repository remains a valuable example of how to structure and automate deployments using Terraform in a real-world Azure setup.
 
----
+<br>
 
 ## 🌐 Purpose
 
@@ -18,7 +18,7 @@ Each team:
 - Referenced that module from this infrastructure repository.
 - Deployed the app into a shared **Azure Container Apps Environment**.
 
----
+<br>
 
 ## 🧩 What Was Already Provisioned (Shared Lab Resources)
 
@@ -28,7 +28,7 @@ Each team:
 
 All teams used these shared resources to test Terraform workflows and CI/CD integrations.
 
----
+<br>
 
 ## ⚙️ Workflow (Original Lab Process)
 
@@ -40,7 +40,7 @@ All teams used these shared resources to test Terraform workflows and CI/CD inte
 - Ran `terraform plan` on PR creation.
 - Ran `terraform apply` on merge to `main`.
 
----
+<br>
 
 ## 🧱 Repository Structure
 
@@ -58,9 +58,7 @@ All teams used these shared resources to test Terraform workflows and CI/CD inte
 │ └── mg-fg.tf # Module call (example usage)
 └── README.md
 ```
-
-
----
+<br>
 
 ## 🔗 Related Repository
 
@@ -73,7 +71,20 @@ That module handled:
 - Health probe configuration
 - Networking and ingress setup
 
----
+<br>
+
+## 👥 Authors
+
+- **Federico González** ([codenamecoffee](https://github.com/codenamecoffee))
+- **Mariana Guerra** ([MarianaGuerraC](https://github.com/MarianaGuerraC))
+
+<br>
+
+## 🪪 License
+
+This project is released under the [MIT License](LICENSE).
+
+<br>
 
 ## 🎓 Educational Context
 
@@ -84,18 +95,3 @@ It demonstrates:
 - Azure resource orchestration in a shared environment  
 
 While no longer functional, it remains a practical learning artifact for DevOps and Cloud Infrastructure concepts.
-
----
-
-## 🪪 License
-
-This project is released under the [MIT License](LICENSE).
-
----
-
-## 👥 Authors
-
-- **Federico González** ([codenamecoffee](https://github.com/codenamecoffee))
-- **Mariana Guerra** ([MarianaGuerraC](https://github.com/MarianaGuerraC))
-
-
